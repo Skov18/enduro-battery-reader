@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Enduro Power SOC Reader</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;padding:22px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#090c10;color:#f5f7fa}.card{max-width:620px;margin:20px auto;background:#161b22;border-radius:24px;padding:24px;box-shadow:0 10px 40px #0008}h1{margin:0;font-size:28px}.sub{margin-top:6px;color:#9ea9b5}.soc{font-size:78px;font-weight:800;line-height:1;margin:28px 0 20px}button{width:100%;border:0;border-radius:16px;padding:16px 18px;font-size:19px;font-weight:750;background:#fff;color:#111}button.secondary{margin-top:10px;background:#2a313b;color:#fff}.status{margin:16px 0;padding:12px 14px;border-radius:12px;background:#0e1319;color:#b9c3ce;font-size:15px;line-height:1.4}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.box{background:#0e1319;border-radius:15px;padding:15px}.value{font-size:23px;font-weight:750}.label{font-size:12px;color:#95a1ad;margin-top:5px}.cells,.debug{margin-top:16px;background:#0e1319;border-radius:15px;padding:14px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.65;white-space:pre-wrap;word-break:break-word}.debug{max-height:280px;overflow:auto;color:#aeb8c3}.good{color:#7ee787}.bad{color:#ff7b72}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>Enduro Power 36V 50Ah</h1><div class="sub">Legacy Enduro / Topband BLE reader</div>
+<div class="soc"><span id="soc">--</span><span style="font-size:32px">%</span></div>
+<button id="connect">Connect / Read Battery</button><button id="disconnect" class="secondary">Disconnect</button>
+<div id="status" class="status">Ready. Open this page in Bluefy, then tap Connect.</div>
+<div class="grid">
+<div class="box"><div id="voltage" class="value">--</div><div class="label">Pack voltage</div></div>
+<div class="box"><div id="current" class="value">--</div><div class="label">Current</div></div>
+<div class="box"><div id="capacity" class="value">--</div><div class="label">Remaining capacity</div></div>
+<div class="box"><div id="temp" class="value">--</div><div class="label">Temperature</div></div>
+<div class="box"><div id="cycles" class="value">--</div><div class="label">Cycles</div></div>
+<div class="box"><div id="packets" class="value">0</div><div class="label">FFE4 notifications</div></div>
+</div>
+<div id="cells" class="cells">Cells: --</div><div id="debug" class="debug">Debug log:\n</div>
+</div>
+<script>
+const SERVICE_UUID='0000ffe0-0000-1000-8000-00805f9b34fb';
+const NOTIFY_UUID='0000ffe4-0000-1000-8000-00805f9b34fb';
+let device=null, characteristic=null, packetCount=0, collecting=false, asciiHex='';
+const $=id=>document.getElementById(id);
+function log(msg,cls=''){const d=$('debug');const t=new Date().toLocaleTimeString();d.innerHTML+=`<span class="${cls}">[${t}] ${msg}</span>\n`;d.scrollTop=d.scrollHeight;}
+function status(msg){$('status').textContent=msg;log(msg)}
+function resetDisplay(){for(const id of ['soc','voltage','current','capacity','temp','cycles'])$(id).textContent='--';$('cells').textContent='Cells: --';$('packets').textContent='0';packetCount=0;collecting=false;asciiHex='';}
+function hexByte(n){return n.toString(16).padStart(2,'0').toUpperCase()}
+function bytesFromHex(s){const out=new Uint8Array(s.length/2);for(let i=0;i<out.length;i++)out[i]=parseInt(s.substr(i*2,2),16);return out;}
+function parseEnduroPayload(hex){if(hex.length<108)return false;hex=hex.slice(0,108);if(!/^[0-9A-Fa-f]{108}$/.test(hex))return false;const b=bytesFromHex(hex),dv=new DataView(b.buffer);const voltage=dv.getUint32(0,true)/1000;const current=dv.getInt32(4,true)/1000;const capacity=dv.getUint32(8,true)/1000;const cycles=dv.getUint16(12,true);const soc=dv.getUint16(14,true);const tempC=(dv.getUint16(16,true)-2731)/10;if(!(soc>=0&&soc<=100)||!(voltage>20&&voltage<60))return false;$('soc').textContent=soc;$('voltage').textContent=voltage.toFixed(2)+' V';$('current').textContent=current.toFixed(2)+' A';$('capacity').textContent=capacity.toFixed(2)+' Ah';$('cycles').textContent=cycles;$('temp').textContent=(tempC*9/5+32).toFixed(1)+' °F';const cells=[];for(let off=22;off+1<b.length&&cells.length<12;off+=2){const mv=dv.getUint16(off,true);if(mv>=2000&&mv<=4500)cells.push(mv/1000);else if(cells.length)break;}if(cells.length)$('cells').textContent='Cells: '+cells.map((v,i)=>`${i+1}: ${v.toFixed(3)} V`).join('   ');$('status').innerHTML='<span class="good">Live Enduro data received.</span>';log(`Decoded frame: SOC ${soc}%, ${voltage.toFixed(3)} V`,'good');return true;}
+function onNotification(event){const view=event.target.value;const data=new Uint8Array(view.buffer,view.byteOffset,view.byteLength);packetCount++;$('packets').textContent=packetCount;if(packetCount<=8||packetCount%25===0)log('FFE4: '+Array.from(data).map(hexByte).join(' '));for(const byte of data){if(byte===0xE6){collecting=true;asciiHex='';continue}if(!collecting)continue;const ch=String.fromCharCode(byte);if(/[0-9A-Fa-f]/.test(ch)){asciiHex+=ch;if(asciiHex.length===108){const ok=parseEnduroPayload(asciiHex);collecting=false;asciiHex='';if(!ok)log('Complete frame received but failed plausibility check.','bad');}}else if(byte===0x26){if(asciiHex.length<108){collecting=false;asciiHex='';}}}}
+async function connectBattery(){resetDisplay();if(!navigator.bluetooth){$('status').innerHTML='<span class="bad">Web Bluetooth is unavailable. Open this page in Bluefy, not Safari.</span>';log('navigator.bluetooth is undefined.','bad');return;}try{status('Stage 1/5: Opening Bluetooth device chooser…');device=await navigator.bluetooth.requestDevice({filters:[{services:[SERVICE_UUID]}],optionalServices:[SERVICE_UUID]});log(`Selected device: ${device.name||'(unnamed)'}`,'good');device.addEventListener('gattserverdisconnected',()=>{$('status').textContent='Battery disconnected.';log('GATT disconnected.','bad');});status('Stage 2/5: Connecting to battery GATT server…');const server=await device.gatt.connect();log('GATT connected.','good');status('Stage 3/5: Opening FFE0 service…');const service=await server.getPrimaryService(SERVICE_UUID);log('FFE0 service found.','good');status('Stage 4/5: Opening FFE4 notification characteristic…');characteristic=await service.getCharacteristic(NOTIFY_UUID);log('FFE4 characteristic found.','good');status('Stage 5/5: Enabling FFE4 notifications…');characteristic.addEventListener('characteristicvaluechanged',onNotification);await characteristic.startNotifications();$('status').innerHTML='<span class="good">Connected. Waiting for Enduro telemetry…</span>';log('FFE4 notifications enabled. Waiting for frame.','good');}catch(err){const name=err&&err.name?err.name:'UnknownError';const msg=err&&err.message?err.message:String(err);$('status').innerHTML=`<span class="bad">${name}: ${msg}</span>`;log(`${name}: ${msg}`,'bad');}}
+async function disconnectBattery(){try{if(characteristic){try{await characteristic.stopNotifications()}catch(e){}}if(device&&device.gatt&&device.gatt.connected)device.gatt.disconnect();characteristic=null;$('status').textContent='Disconnected.';log('Disconnected by user.');}catch(e){log('Disconnect error: '+(e.message||e),'bad')}}
+$('connect').addEventListener('click',connectBattery);$('disconnect').addEventListener('click',disconnectBattery);log('Reader loaded. Full FFE0/FFE4 UUID mode enabled.');
+</script>
+</body></html>
