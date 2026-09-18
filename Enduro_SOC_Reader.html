@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Enduro Power SOC</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#0b0d10;color:#f4f6f8;margin:0;padding:24px}
+.card{max-width:560px;margin:auto;background:#161a20;border-radius:22px;padding:24px;box-shadow:0 8px 30px #0008}
+h1{font-size:24px;margin:0 0 8px}.muted{color:#9aa4af}.soc{font-size:72px;font-weight:800;line-height:1;margin:22px 0}
+button{font-size:18px;font-weight:700;border:0;border-radius:14px;padding:15px 18px;width:100%;background:#fff;color:#111}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:20px}.box{background:#0f1318;border-radius:14px;padding:14px}.v{font-size:22px;font-weight:700}.k{font-size:12px;color:#9aa4af;margin-top:4px}
+#cells{margin-top:18px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;line-height:1.7;color:#cbd5df}
+#status{margin:14px 0;color:#9aa4af}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>Enduro Power 36V 50Ah</h1>
+<div class="muted">Legacy Topband / Enduro BLE reader</div>
+<div class="soc"><span id="soc">--</span><span style="font-size:30px">%</span></div>
+<button id="connect">Connect / Read Battery</button>
+<div id="status">Ready</div>
+<div class="grid">
+<div class="box"><div class="v" id="voltage">--</div><div class="k">Pack voltage</div></div>
+<div class="box"><div class="v" id="current">--</div><div class="k">Current</div></div>
+<div class="box"><div class="v" id="capacity">--</div><div class="k">Capacity</div></div>
+<div class="box"><div class="v" id="temp">--</div><div class="k">Temperature</div></div>
+<div class="box"><div class="v" id="cycles">--</div><div class="k">Cycles</div></div>
+<div class="box"><div class="v" id="source">--</div><div class="k">SOC source</div></div>
+</div>
+<div id="cells"></div>
+</div>
+<script>
+const SVC=0xffe0, NOTIFY=0xffe4;
+let collecting=false, frame=[];
+const $=id=>document.getElementById(id);
+function setStatus(s){$('status').textContent=s}
+function bytesFromHex(s){const a=[];for(let i=0;i<s.length;i+=2)a.push(parseInt(s.slice(i,i+2),16));return new Uint8Array(a)}
+function parseFrameAscii(ascii){
+  if(ascii.length<108)return;
+  const hex=ascii.slice(0,108);
+  if(!/^[0-9A-Fa-f]{108}$/.test(hex))return;
+  const b=bytesFromHex(hex), dv=new DataView(b.buffer);
+  const voltage=dv.getUint32(0,true)/1000;
+  let current=dv.getInt32(4,true)/1000;
+  if(Math.abs(current)<0.1) current=0;
+  const capacity=dv.getUint32(8,true)/1000;
+  const cycles=dv.getUint16(12,true);
+  const soc=dv.getUint16(14,true);
+  const tempC=(dv.getUint16(16,true)-2731)/10;
+  if(soc>=0&&soc<=100){$('soc').textContent=soc;$('source').textContent='FFE4';}
+  $('voltage').textContent=voltage.toFixed(2)+' V';
+  $('current').textContent=current.toFixed(2)+' A';
+  $('capacity').textContent=capacity.toFixed(2)+' Ah';
+  $('temp').textContent=(tempC*9/5+32).toFixed(1)+' °F';
+  $('cycles').textContent=cycles;
+  const cells=[];
+  for(let i=0;i<12;i++) cells.push(dv.getUint16(22+i*2,true)/1000);
+  $('cells').textContent='Cells: '+cells.map((v,i)=>`${i+1}:${v.toFixed(3)}V`).join('  ');
+  setStatus('Live data received');
+}
+function onNotify(ev){
+  const d=new Uint8Array(ev.target.value.buffer,ev.target.value.byteOffset,ev.target.value.byteLength);
+  for(const x of d){
+    if(x===0xE6){collecting=true;frame=[];continue}
+    if(!collecting)continue;
+    if(x===0x26){
+      const ascii=new TextDecoder('ascii').decode(new Uint8Array(frame));
+      parseFrameAscii(ascii);
+      collecting=false; frame=[];
+      continue
+    }
+    if(frame.length<300)frame.push(x); else {collecting=false;frame=[]}
+  }
+}
+function tryAdvertisementSOC(ev){
+  try{
+    for(const [id,dv] of ev.manufacturerData){
+      if(id===0xffff && dv.byteLength>=1){
+        const soc=dv.getUint8(dv.byteLength-1);
+        if(soc<=100){$('soc').textContent=soc;$('source').textContent='Advertisement';}
+      }
+    }
+  }catch(e){}
+}
+$('connect').onclick=async()=>{
+  try{
+    setStatus('Choose the Enduro battery…');
+    const dev=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[SVC]});
+    dev.addEventListener('advertisementreceived',tryAdvertisementSOC);
+    if(dev.watchAdvertisements){try{await dev.watchAdvertisements()}catch(e){}}
+    setStatus('Connecting…');
+    const server=await dev.gatt.connect();
+    const svc=await server.getPrimaryService(SVC);
+    const ch=await svc.getCharacteristic(NOTIFY);
+    ch.addEventListener('characteristicvaluechanged',onNotify);
+    await ch.startNotifications();
+    setStatus('Connected. Waiting for battery data…');
+  }catch(e){setStatus('Error: '+(e.message||e))}
+};
+</script>
+</body>
+</html>
